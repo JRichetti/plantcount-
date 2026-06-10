@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#2a7a2a">
+  <title>PlantCount</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="icon" href="icon-192.png" sizes="192x192" type="image/png">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- Camera feed / video playback -->
+  <video id="video" autoplay playsinline muted loop></video>
+
+  <!-- Still photo (photo mode) -->
+  <img id="photo" alt="">
+
+  <!-- Drawing canvas (overlays video/photo exactly) -->
+  <canvas id="overlay"></canvas>
+
+  <!-- Counter badge -->
+  <div id="counter-badge">
+    <span id="count-number">0</span>
+    <span id="count-label">plants</span>
+  </div>
+
+  <!-- Hint -->
+  <div id="hint">Sweep the camera left↔right — plants are counted as they cross the line</div>
+
+  <!-- Settings panel -->
+  <div id="settings-panel" class="hidden">
+    <div class="setting-row">
+      <span class="setting-label">Sensitivity</span>
+      <input type="range" id="sensitivity" min="0" max="100" value="80" step="1">
+    </div>
+    <div class="setting-row">
+      <span class="setting-label">Working area</span>
+      <div class="area-btns">
+        <button class="area-btn" id="btn-area-smaller">−</button>
+        <button class="area-btn" id="btn-area-larger">+</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Video file playback controls (video mode only) -->
+  <div id="video-controls" class="hidden">
+    <button id="btn-playpause" class="vc-btn">⏸</button>
+    <input type="range" id="video-scrubber" min="0" max="100" value="0" step="0.01">
+    <span id="video-time">0:00</span>
+    <select id="video-speed" class="vc-select">
+      <option value="0.25">¼×</option>
+      <option value="0.5">½×</option>
+      <option value="1" selected>1×</option>
+      <option value="2">2×</option>
+    </select>
+  </div>
+
+  <!-- Bottom controls -->
+  <div id="controls">
+    <button class="ctrl-btn icon" id="btn-settings" title="Settings">⚙</button>
+    <button class="ctrl-btn" id="btn-reset">Reset</button>
+    <button class="ctrl-btn icon" id="btn-flip" title="Flip camera">🔄</button>
+    <button class="ctrl-btn icon" id="btn-source" title="Switch source">⇄</button>
+  </div>
+
+  <!-- Hidden file inputs -->
+  <input type="file" id="file-input-video" accept="video/*" style="display:none">
+  <input type="file" id="file-input-photo" accept="image/*" style="display:none">
+
+  <!-- Splash / source-picker screen -->
+  <div id="splash">
+    <svg width="72" height="72" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+      <rect width="100" height="100" rx="22" fill="#2a7a2a"/>
+      <path d="M50 78 Q50 57 34 46 Q50 50 50 41 Q50 50 66 46 Q50 57 50 78Z" fill="#7fdd7f"/>
+      <rect x="47" y="73" width="6" height="13" rx="3" fill="#5cb85c"/>
+    </svg>
+    <h1>PlantCount</h1>
+    <p>Count crop emergence. Pan the camera along the row to tally plants as they cross the line, or analyse a still photo.</p>
+    <div class="splash-btns">
+      <button id="btn-start-camera">Live Camera</button>
+      <button id="btn-load-video-splash">Load Video File</button>
+      <button id="btn-load-photo-splash">Analyse a Photo</button>
+    </div>
+    <p id="splash-error"></p>
+  </div>
+
+</div>
+<script src="js/detector.js"></script>
+<script src="js/tracker.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
