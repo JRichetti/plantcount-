@@ -11,7 +11,8 @@
  *                                         (splits touching seedlings into separate counts)
  *
  * Two entry points share the pipeline:
- *   detectFrame(video, …)  → live, cover-mapped, restricted to working area, DISPLAY px.
+ *   detectFrame(video, …)  → live, full-frame aspect, restricted to working area,
+ *                            takes/returns SOURCE (camera-frame) pixels.
  *   detectImage(img)       → whole still photo, IMAGE-NATURAL px.
  */
 class PlantDetector {
@@ -45,25 +46,29 @@ class PlantDetector {
 
   _nmsRadius() { return Math.max(2, Math.round(this.sizeFrac * this._pw)); }
 
-  // ── Live frame: cover mapping, restricted to working area ──────────────────
-  detectFrame(source, srcW, srcH, wa, dispW, dispH) {
+  // ── Live frame: whole frame at source aspect, restricted to working area ───
+  // `wa` is the working area in SOURCE pixels; boxes are returned in SOURCE pixels.
+  detectFrame(source, srcW, srcH, wa) {
     if (!srcW || !srcH) return [];
-    this._ensure(this.BASE_W, this.BASE_H);
-    const W = this._pw, H = this._ph;
 
-    const fit = Math.max(W / srcW, H / srcH);
-    const dW = srcW * fit, dH = srcH * fit;
-    this._ctx.drawImage(source, (W - dW) / 2, (H - dH) / 2, dW, dH);
+    const maxDim = 360; // cap processing resolution for speed
+    const fit = Math.min(maxDim / srcW, maxDim / srcH, 1);
+    const W = Math.max(1, Math.round(srcW * fit));
+    const H = Math.max(1, Math.round(srcH * fit));
+    this._ensure(W, H);
+
+    this._ctx.clearRect(0, 0, W, H);
+    this._ctx.drawImage(source, 0, 0, W, H); // whole frame, aspect preserved
     const data = this._ctx.getImageData(0, 0, W, H).data;
 
-    const sx = W / dispW, sy = H / dispH;
-    const x0 = Math.max(Math.floor(wa.x * sx), 0);
-    const y0 = Math.max(Math.floor(wa.y * sy), 0);
-    const x1 = Math.min(Math.ceil((wa.x + wa.w) * sx), W);
-    const y1 = Math.min(Math.ceil((wa.y + wa.h) * sy), H);
+    const x0 = Math.max(Math.floor(wa.x * fit), 0);
+    const y0 = Math.max(Math.floor(wa.y * fit), 0);
+    const x1 = Math.min(Math.ceil((wa.x + wa.w) * fit), W);
+    const y1 = Math.min(Math.ceil((wa.y + wa.h) * fit), H);
+    if (x1 <= x0 || y1 <= y0) return [];
 
     const peaks = this._pipeline(data, x0, y0, x1, y1);
-    return this._peaksToBoxes(peaks, dispW / W, dispH / H);
+    return this._peaksToBoxes(peaks, srcW / W, srcH / H);
   }
 
   // ── Whole still photo: boxes in image-natural pixels ───────────────────────

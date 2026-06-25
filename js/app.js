@@ -23,8 +23,9 @@ const state = {
   count:      0,          // cumulative plants counted (live modes)
   photoBoxes: [],         // image-coord boxes (photo mode)
   photoRect:  null,       // displayed photo rect (contain fit)
-  waScale:    0.82,       // working-area fraction of screen
-  wa:         null,       // {x,y,w,h}
+  videoRect:  null,       // displayed camera/video rect (contain fit)
+  waScale:    0.82,       // working-area fraction of the visible frame
+  wa:         null,       // {x,y,w,h} in display px
   lineFrac:   0.5,        // counting-line position within working area (0..1)
   frameId:    null,
   lastDetect: 0,
@@ -38,16 +39,27 @@ const MIN_AGE = 2;        // frames a track must persist before it may be counte
 const CROSS_DEADBAND = 2; // px of movement required to accept a line crossing
 
 // ── Geometry helpers ──────────────────────────────────────────────────────────
-function computeWA() {
-  const W = overlay.width, H = overlay.height;
-  const ww = W * state.waScale, wh = H * Math.min(state.waScale * 0.72, 0.82);
-  state.wa = { x: (W - ww) / 2, y: (H - wh) / 2, w: ww, h: wh };
-}
-
 function containRect(natW, natH, dispW, dispH) {
   const scale = Math.min(dispW / natW, dispH / natH);
   const w = natW * scale, h = natH * scale;
   return { x: (dispW - w) / 2, y: (dispH - h) / 2, w, h, scale };
+}
+
+// Rect of the actually-visible frame on screen (camera/video letterboxed).
+function computeVideoRect() {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  state.videoRect = (vw && vh)
+    ? containRect(vw, vh, overlay.width, overlay.height)
+    : null;
+}
+
+// Working area = centred fraction of the visible frame, so it never sits on
+// the letterbox bars.
+function computeWA() {
+  const base = state.videoRect || { x: 0, y: 0, w: overlay.width, h: overlay.height };
+  const ww = base.w * state.waScale;
+  const wh = base.h * state.waScale;
+  state.wa = { x: base.x + (base.w - ww) / 2, y: base.y + (base.h - wh) / 2, w: ww, h: wh };
 }
 
 // ── Mode / UI ──────────────────────────────────────────────────────────────────
@@ -88,8 +100,14 @@ async function startCamera() {
   stopCamera();
   stopVideoFile();
 
+  // Request the widest 4:3 sensor view (full FOV) rather than a cropped 16:9.
   const constraints = {
-    video: { facingMode: { ideal: state.facing }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+    video: {
+      facingMode: { ideal: state.facing },
+      width:  { ideal: 1280 },
+      height: { ideal: 960 },
+      aspectRatio: { ideal: 4 / 3 },
+    },
     audio: false,
   };
 
@@ -168,12 +186,20 @@ function resetCount() {
 function resize() {
   overlay.width  = window.innerWidth;
   overlay.height = window.innerHeight;
-  computeWA();
   if (state.mode === 'photo' && photo.naturalWidth) {
     state.photoRect = containRect(photo.naturalWidth, photo.naturalHeight, overlay.width, overlay.height);
+  } else {
+    computeVideoRect();
   }
+  computeWA();
 }
 window.addEventListener('resize', resize);
+
+// The stream's dimensions are only known once metadata loads — recompute then.
+video.addEventListener('loadedmetadata', () => {
+  computeVideoRect();
+  computeWA();
+});
 
 // ── Render loop ──────────────────────────────────────────────────────────────
 function loop(ts = 0) {
@@ -182,20 +208,41 @@ function loop(ts = 0) {
   ctx.clearRect(0, 0, W, H);
 
   if (state.mode === 'photo') { drawPhoto(W, H); return; }
-  if (!state.wa || !video.videoWidth) return;
+  if (!state.wa || !video.videoWidth || !state.videoRect) return;
 
   if (ts - state.lastDetect > state.DETECT_MS) {
     state.lastDetect = ts;
-    runDetection(W, H);
+    runDetection();
   }
   drawLive(W, H);
 }
 
 // ── Live detection + line-crossing count ───────────────────────────────────────
-function runDetection(W, H) {
+function runDetection() {
+  const vr = state.videoRect;
+
+  // Working area (display px) → source pixels for the detector.
+  const waSrc = {
+    x: (state.wa.x - vr.x) / vr.scale,
+    y: (state.wa.y - vr.y) / vr.scale,
+    w: state.wa.w / vr.scale,
+    h: state.wa.h / vr.scale,
+  };
+
+  // Detector returns source-pixel boxes → map back to display px.
   const dets = detector
-    .detectFrame(video, video.videoWidth, video.videoHeight, state.wa, W, H)
-    .map(b => ({ cx: b.cx, cy: b.cy, box: b }));
+    .detectFrame(video, video.videoWidth, video.videoHeight, waSrc)
+    .map(b => {
+      const box = {
+        x:  vr.x + b.x  * vr.scale,
+        y:  vr.y + b.y  * vr.scale,
+        w:  b.w * vr.scale,
+        h:  b.h * vr.scale,
+        cx: vr.x + b.cx * vr.scale,
+        cy: vr.y + b.cy * vr.scale,
+      };
+      return { cx: box.cx, cy: box.cy, box };
+    });
 
   tracker.update(dets);
 

@@ -24,7 +24,8 @@ html, body {
   position: absolute;
   inset: 0;
   width: 100%; height: 100%;
-  object-fit: cover;
+  object-fit: contain;   /* show full camera FOV, no crop/zoom */
+  background: #000;
 }
 
 #photo {
