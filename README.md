@@ -29,8 +29,9 @@ Everything happens in the browser tab and is gone when you close it.
 
 - `index.html` — markup and screens
 - `css/app.css` — styling
-- `js/detector.js` — green-blob image processing
-- `js/tracker.js` — centroid tracker (assigns IDs, enables line-crossing count)
+- `js/detector.js` — vegetation detection: Excess-Green index + Otsu auto-threshold,
+  distance transform + peak finding to split touching seedlings (no ML)
+- `js/tracker.js` — centroid tracker with smoothing (assigns IDs, enables line-crossing count)
 - `js/app.js` — UI, camera/video/photo modes, counting logic
 - `sw.js` — service worker (offline cache)
 - `manifest.json`, `icon.svg` — PWA install metadata

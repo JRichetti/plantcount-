@@ -1,4 +1,4 @@
-const CACHE = 'plantcount-v4';
+const CACHE = 'plantcount-v5';
 const FILES = [
   './index.html',
   './css/app.css',

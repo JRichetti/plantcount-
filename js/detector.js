@@ -1,44 +1,49 @@
 /**
- * PlantDetector — green-blob detection via canvas image processing.
- * No external model. Fully offline.
+ * PlantDetector — classical (no-ML) seedling detection.
+ * Fully offline, tiny, runs on any phone.
  *
- * Pipeline: green pixel mask → morphological close → connected components → area filter.
+ * Pipeline:
+ *   1. Excess-Green vegetation index   ExG = 2G − R − B   (separates plant from soil)
+ *   2. Otsu automatic threshold         → binary plant mask (self-adjusts to lighting)
+ *   3. Morphological close              → fill pinholes
+ *   4. Distance transform               → "thickness" of each plant region
+ *   5. Peak finding + NMS               → one seed per local maximum
+ *                                         (splits touching seedlings into separate counts)
  *
- * Two entry points share the same pipeline:
- *   detectFrame(video, …)  → live camera/video, cover-mapped, restricted to working area,
- *                            boxes returned in DISPLAY pixels.
- *   detectImage(img)       → whole still photo, boxes returned in IMAGE-NATURAL pixels.
+ * Two entry points share the pipeline:
+ *   detectFrame(video, …)  → live, cover-mapped, restricted to working area, DISPLAY px.
+ *   detectImage(img)       → whole still photo, IMAGE-NATURAL px.
  */
 class PlantDetector {
   constructor() {
-    this.minArea = 40;     // at the 320×240 baseline; scaled to actual proc size
-    this.maxArea = 14000;
+    // Expected seedling radius as a fraction of the processed frame width.
+    // Smaller fraction = detects/splits smaller plants (more sensitive).
+    this.sizeFrac = 0.020;
+    this.EXG_FLOOR = 12;   // min ExG (0–255) to ever be considered plant
     this.BASE_W = 320;
     this.BASE_H = 240;
 
     this._canvas = document.createElement('canvas');
     this._ctx = this._canvas.getContext('2d', { willReadFrequently: true });
     this._pw = 0; this._ph = 0;
-    this._mask = this._tmp = this._labels = this._stack = null;
+    this._mask = this._tmp = this._feat = this._dist = null;
     this._ensure(this.BASE_W, this.BASE_H);
   }
 
-  setMinArea(v) { this.minArea = v; }
+  setSizeFrac(f) { this.sizeFrac = f; }
 
   _ensure(w, h) {
     if (this._pw === w && this._ph === h) return;
     this._pw = w; this._ph = h;
     this._canvas.width = w; this._canvas.height = h;
     const n = w * h;
-    this._mask   = new Uint8Array(n);
-    this._tmp    = new Uint8Array(n);
-    this._labels = new Int32Array(n);
-    this._stack  = new Int32Array(n);
+    this._mask = new Uint8Array(n);   // binary plant mask
+    this._tmp  = new Uint8Array(n);   // morphology scratch
+    this._feat = new Uint8Array(n);   // ExG, clamped 0–255
+    this._dist = new Int32Array(n);   // chamfer distance transform
   }
 
-  _areaScale() { return (this._pw * this._ph) / (this.BASE_W * this.BASE_H); }
-  _minAreaPx() { return this.minArea * this._areaScale(); }
-  _maxAreaPx() { return this.maxArea * this._areaScale(); }
+  _nmsRadius() { return Math.max(2, Math.round(this.sizeFrac * this._pw)); }
 
   // ── Live frame: cover mapping, restricted to working area ──────────────────
   detectFrame(source, srcW, srcH, wa, dispW, dispH) {
@@ -46,7 +51,6 @@ class PlantDetector {
     this._ensure(this.BASE_W, this.BASE_H);
     const W = this._pw, H = this._ph;
 
-    // Replicate object-fit:cover so detector coords line up with what's shown.
     const fit = Math.max(W / srcW, H / srcH);
     const dW = srcW * fit, dH = srcH * fit;
     this._ctx.drawImage(source, (W - dW) / 2, (H - dH) / 2, dW, dH);
@@ -58,8 +62,8 @@ class PlantDetector {
     const x1 = Math.min(Math.ceil((wa.x + wa.w) * sx), W);
     const y1 = Math.min(Math.ceil((wa.y + wa.h) * sy), H);
 
-    const blobs = this._pipeline(data, x0, y0, x1, y1);
-    return this._toBoxes(blobs, dispW / W, dispH / H);
+    const peaks = this._pipeline(data, x0, y0, x1, y1);
+    return this._peaksToBoxes(peaks, dispW / W, dispH / H);
   }
 
   // ── Whole still photo: boxes in image-natural pixels ───────────────────────
@@ -67,7 +71,7 @@ class PlantDetector {
     const natW = img.naturalWidth, natH = img.naturalHeight;
     if (!natW || !natH) return [];
 
-    const maxDim = 540; // cap processing resolution for speed
+    const maxDim = 540;
     const fit = Math.min(maxDim / natW, maxDim / natH, 1);
     const W = Math.max(1, Math.round(natW * fit));
     const H = Math.max(1, Math.round(natH * fit));
@@ -77,126 +81,199 @@ class PlantDetector {
     this._ctx.drawImage(img, 0, 0, W, H);
     const data = this._ctx.getImageData(0, 0, W, H).data;
 
-    const blobs = this._pipeline(data, 0, 0, W, H);
-    return this._toBoxes(blobs, natW / W, natH / H);
+    const peaks = this._pipeline(data, 0, 0, W, H);
+    return this._peaksToBoxes(peaks, natW / W, natH / H);
   }
 
   // ── Shared pipeline ────────────────────────────────────────────────────────
   _pipeline(data, x0, y0, x1, y1) {
-    const W = this._pw, H = this._ph, r = 2;
+    const W = this._pw, H = this._ph, r = 1;
     this._mask.fill(0);
     this._tmp.fill(0);
-    this._buildMask(data, x0, y0, x1, y1);
+
+    const t = this._exgOtsu(data, x0, y0, x1, y1);   // builds _feat + returns threshold
+    for (let y = y0; y < y1; y++) {
+      for (let x = x0; x < x1; x++) {
+        const i = y * W + x;
+        if (this._feat[i] > t) this._mask[i] = 1;
+      }
+    }
 
     const ex0 = Math.max(x0 - r, 0), ey0 = Math.max(y0 - r, 0);
     const ex1 = Math.min(x1 + r, W),  ey1 = Math.min(y1 + r, H);
     this._morphClose(r, ex0, ey0, ex1, ey1);
-    return this._connectedComponents(ex0, ey0, ex1, ey1);
+    this._distanceTransform(ex0, ey0, ex1, ey1);
+    return this._findPeaks(ex0, ey0, ex1, ey1);
   }
 
-  _toBoxes(blobs, bx, by) {
-    const minA = this._minAreaPx(), maxA = this._maxAreaPx();
-    const out = [];
-    for (const b of blobs) {
-      if (b.area < minA || b.area > maxA) continue;
-      out.push({
-        x:  b.x0 * bx,
-        y:  b.y0 * by,
-        w:  (b.x1 - b.x0 + 1) * bx,
-        h:  (b.y1 - b.y0 + 1) * by,
-        cx: b.cx * bx,
-        cy: b.cy * by,
-      });
-    }
-    return out;
-  }
+  // Excess-Green into _feat, Otsu threshold over the region.
+  _exgOtsu(data, x0, y0, x1, y1) {
+    const W = this._pw, feat = this._feat;
+    const hist = new Int32Array(256);
+    let total = 0;
 
-  _buildMask(data, x0, y0, x1, y1) {
-    const W = this._pw, mask = this._mask;
     for (let y = y0; y < y1; y++) {
       for (let x = x0; x < x1; x++) {
-        const i = (y * W + x) << 2;
-        const r = data[i], g = data[i + 1], b = data[i + 2];
-        // Green channel dominant with a minimum brightness (loose → sensitive).
-        if (g > r + 6 && g > b + 3 && g > 26) mask[y * W + x] = 1;
+        const i = y * W + x, j = i << 2;
+        let exg = 2 * data[j + 1] - data[j] - data[j + 2]; // 2G − R − B
+        if (exg < 0) exg = 0; else if (exg > 255) exg = 255;
+        feat[i] = exg;
+        hist[exg]++;
+        total++;
       }
     }
+    if (!total) return 255;
+
+    // Otsu: maximise between-class variance.
+    let sum = 0;
+    for (let k = 0; k < 256; k++) sum += k * hist[k];
+    let sumB = 0, wB = 0, maxVar = -1, thr = 0;
+    for (let k = 0; k < 256; k++) {
+      wB += hist[k];
+      if (!wB) continue;
+      const wF = total - wB;
+      if (!wF) break;
+      sumB += k * hist[k];
+      const mB = sumB / wB;
+      const mF = (sum - sumB) / wF;
+      const between = wB * wF * (mB - mF) * (mB - mF);
+      if (between > maxVar) { maxVar = between; thr = k; }
+    }
+    return Math.max(thr, this.EXG_FLOOR);
   }
 
   _morphClose(r, x0, y0, x1, y1) {
     const W = this._pw, src = this._mask, tmp = this._tmp;
-
-    // Dilate src → tmp
     for (let y = y0; y < y1; y++) {
       for (let x = x0; x < x1; x++) {
         let v = 0;
         const ny0 = Math.max(y - r, y0), ny1 = Math.min(y + r, y1 - 1);
         const nx0 = Math.max(x - r, x0), nx1 = Math.min(x + r, x1 - 1);
-        outer: for (let ny = ny0; ny <= ny1; ny++) {
-          for (let nx = nx0; nx <= nx1; nx++) {
+        outer: for (let ny = ny0; ny <= ny1; ny++)
+          for (let nx = nx0; nx <= nx1; nx++)
             if (src[ny * W + nx]) { v = 1; break outer; }
-          }
-        }
         tmp[y * W + x] = v;
       }
     }
-
-    // Erode tmp → src
     for (let y = y0; y < y1; y++) {
       for (let x = x0; x < x1; x++) {
         let v = 1;
         const ny0 = Math.max(y - r, y0), ny1 = Math.min(y + r, y1 - 1);
         const nx0 = Math.max(x - r, x0), nx1 = Math.min(x + r, x1 - 1);
-        outer: for (let ny = ny0; ny <= ny1; ny++) {
-          for (let nx = nx0; nx <= nx1; nx++) {
+        outer: for (let ny = ny0; ny <= ny1; ny++)
+          for (let nx = nx0; nx <= nx1; nx++)
             if (!tmp[ny * W + nx]) { v = 0; break outer; }
-          }
-        }
         src[y * W + x] = v;
       }
     }
   }
 
-  _connectedComponents(x0, y0, x1, y1) {
-    const W = this._pw;
-    const mask = this._mask, labels = this._labels, stack = this._stack;
-    labels.fill(0);
-    const blobs = [];
-    let label = 0;
+  // Chamfer 3-4 distance transform of _mask into _dist (units ≈ 3× pixels).
+  _distanceTransform(x0, y0, x1, y1) {
+    const W = this._pw, mask = this._mask, dist = this._dist;
+    const BIG = 1 << 28;
 
-    for (let sy = y0; sy < y1; sy++) {
-      for (let sx = x0; sx < x1; sx++) {
-        const startIdx = sy * W + sx;
-        if (!mask[startIdx] || labels[startIdx]) continue;
+    for (let y = y0; y < y1; y++)
+      for (let x = x0; x < x1; x++) {
+        const i = y * W + x;
+        dist[i] = mask[i] ? BIG : 0;
+      }
 
-        label++;
-        labels[startIdx] = label;
-        const blob = { area: 0, x0: sx, y0: sy, x1: sx, y1: sy, sumX: 0, sumY: 0, cx: 0, cy: 0 };
-
-        let top = 0;
-        stack[top++] = startIdx;
-        while (top > 0) {
-          const idx = stack[--top];
-          const px = idx % W, py = (idx / W) | 0;
-
-          blob.area++;
-          blob.sumX += px; blob.sumY += py;
-          if (px < blob.x0) blob.x0 = px;
-          if (px > blob.x1) blob.x1 = px;
-          if (py < blob.y0) blob.y0 = py;
-          if (py > blob.y1) blob.y1 = py;
-
-          if (px + 1 < W) { const n = idx + 1; if (mask[n] && !labels[n]) { labels[n] = label; stack[top++] = n; } }
-          if (px - 1 >= 0) { const n = idx - 1; if (mask[n] && !labels[n]) { labels[n] = label; stack[top++] = n; } }
-          if (py + 1 < this._ph) { const n = idx + W; if (mask[n] && !labels[n]) { labels[n] = label; stack[top++] = n; } }
-          if (py - 1 >= 0) { const n = idx - W; if (mask[n] && !labels[n]) { labels[n] = label; stack[top++] = n; } }
-        }
-
-        blob.cx = blob.sumX / blob.area;
-        blob.cy = blob.sumY / blob.area;
-        blobs.push(blob);
+    for (let y = y0; y < y1; y++) {
+      for (let x = x0; x < x1; x++) {
+        const i = y * W + x;
+        if (!mask[i]) continue;
+        let d = dist[i];
+        if (x > x0)              d = Math.min(d, dist[i - 1] + 3);
+        if (y > y0)              d = Math.min(d, dist[i - W] + 3);
+        if (x > x0 && y > y0)    d = Math.min(d, dist[i - W - 1] + 4);
+        if (x < x1 - 1 && y > y0) d = Math.min(d, dist[i - W + 1] + 4);
+        dist[i] = d;
       }
     }
-    return blobs;
+    for (let y = y1 - 1; y >= y0; y--) {
+      for (let x = x1 - 1; x >= x0; x--) {
+        const i = y * W + x;
+        if (!mask[i]) continue;
+        let d = dist[i];
+        if (x < x1 - 1)               d = Math.min(d, dist[i + 1] + 3);
+        if (y < y1 - 1)               d = Math.min(d, dist[i + W] + 3);
+        if (x < x1 - 1 && y < y1 - 1) d = Math.min(d, dist[i + W + 1] + 4);
+        if (x > x0 && y < y1 - 1)     d = Math.min(d, dist[i + W - 1] + 4);
+        dist[i] = d;
+      }
+    }
+  }
+
+  // Local maxima of the distance map, suppressed within one plant radius.
+  _findPeaks(x0, y0, x1, y1) {
+    const W = this._pw, mask = this._mask, dist = this._dist;
+    const nms = this._nmsRadius();
+    const minPeak = Math.max(3, Math.round(nms * 0.4) * 3); // chamfer units
+
+    // Collect local-maximum candidates.
+    const cand = [];
+    for (let y = y0; y < y1; y++) {
+      for (let x = x0; x < x1; x++) {
+        const i = y * W + x;
+        if (!mask[i]) continue;
+        const d = dist[i];
+        if (d < minPeak) continue;
+        let isMax = true;
+        for (let ny = Math.max(y - 1, y0); ny <= Math.min(y + 1, y1 - 1) && isMax; ny++)
+          for (let nx = Math.max(x - 1, x0); nx <= Math.min(x + 1, x1 - 1); nx++)
+            if (dist[ny * W + nx] > d) { isMax = false; break; }
+        if (isMax) cand.push({ x, y, d });
+      }
+    }
+    cand.sort((a, b) => b.d - a.d);
+
+    // Greedy non-maximum suppression on a spatial grid.
+    const cell = Math.max(1, nms);
+    const grid = new Map();
+    const key = (cx, cy) => cx + ',' + cy;
+    const peaks = [];
+    const r2 = nms * nms;
+
+    for (const c of cand) {
+      const gx = (c.x / cell) | 0, gy = (c.y / cell) | 0;
+      let blocked = false;
+      for (let ay = gy - 1; ay <= gy + 1 && !blocked; ay++) {
+        for (let ax = gx - 1; ax <= gx + 1; ax++) {
+          const bucket = grid.get(key(ax, ay));
+          if (!bucket) continue;
+          for (const p of bucket) {
+            const dx = p.x - c.x, dy = p.y - c.y;
+            if (dx * dx + dy * dy < r2) { blocked = true; break; }
+          }
+          if (blocked) break;
+        }
+      }
+      if (blocked) continue;
+      peaks.push(c);
+      const k = key(gx, gy);
+      let bucket = grid.get(k);
+      if (!bucket) grid.set(k, bucket = []);
+      bucket.push(c);
+      if (peaks.length >= 600) break; // safety cap
+    }
+    return peaks;
+  }
+
+  _peaksToBoxes(peaks, bx, by) {
+    const out = [];
+    const cap = this._nmsRadius() * 1.6;          // keep boxes ~plant-sized
+    for (const p of peaks) {
+      const rPx = Math.min(Math.max((p.d / 3) * 1.4, 3), cap); // chamfer → px, padded & capped
+      out.push({
+        x:  (p.x - rPx) * bx,
+        y:  (p.y - rPx) * by,
+        w:  (2 * rPx) * bx,
+        h:  (2 * rPx) * by,
+        cx: p.x * bx,
+        cy: p.y * by,
+      });
+    }
+    return out;
   }
 }

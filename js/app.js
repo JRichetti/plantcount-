@@ -32,7 +32,10 @@ const state = {
 };
 
 const detector = new PlantDetector();
-const tracker  = new CentroidTracker(110, 10);
+const tracker  = new CentroidTracker();
+
+const MIN_AGE = 2;        // frames a track must persist before it may be counted
+const CROSS_DEADBAND = 2; // px of movement required to accept a line crossing
 
 // ── Geometry helpers ──────────────────────────────────────────────────────────
 function computeWA() {
@@ -198,12 +201,12 @@ function runDetection(W, H) {
 
   const lineX = state.wa.x + state.wa.w * state.lineFrac;
   for (const obj of tracker.objects.values()) {
-    if (obj.counted) continue;
+    if (obj.counted || obj.age < MIN_AGE) continue;
     const moved = Math.abs(obj.cx - obj.prevCx);
     const crossed =
       (obj.prevCx < lineX && obj.cx >= lineX) ||
       (obj.prevCx > lineX && obj.cx <= lineX);
-    if (crossed && moved > 0.5) {
+    if (crossed && moved > CROSS_DEADBAND) {
       obj.counted = true;
       obj.flash = 1;
       state.count++;
@@ -261,7 +264,7 @@ function drawLive(W, H) {
 
   // Detected plant boxes (drawn from tracker so they stay stable between detections)
   for (const obj of tracker.objects.values()) {
-    if (obj.disappeared > 0 || !obj.box) continue;
+    if (obj.disappeared > 0 || obj.age < 1 || !obj.box) continue;
     const b = obj.box;
     ctx.save();
     if (obj.flash > 0) {
@@ -338,14 +341,15 @@ document.getElementById('btn-source').addEventListener('click', () => {
 });
 
 // ── Settings ────────────────────────────────────────────────────────────────────
-// Slider is 0–100 sensitivity; higher = smaller min blob size = more sensitive.
-const SENS_MAX_AREA = 300; // least sensitive (slider 0)
-const SENS_MIN_AREA = 12;  // most sensitive  (slider 100)
-function sensToMinArea(s) {
-  return Math.round(SENS_MAX_AREA - (s / 100) * (SENS_MAX_AREA - SENS_MIN_AREA));
+// Slider is 0–100 sensitivity. Higher = smaller expected plant size = detects and
+// splits smaller seedlings (more sensitive). Maps to the detector's size fraction.
+const SIZE_FRAC_MAX = 0.045; // least sensitive (slider 0) — bigger plants only
+const SIZE_FRAC_MIN = 0.011; // most sensitive  (slider 100) — tiny seedlings
+function sensToSizeFrac(s) {
+  return SIZE_FRAC_MAX - (s / 100) * (SIZE_FRAC_MAX - SIZE_FRAC_MIN);
 }
 function applySensitivity() {
-  detector.setMinArea(sensToMinArea(Number(sensitivitySlider.value)));
+  detector.setSizeFrac(sensToSizeFrac(Number(sensitivitySlider.value)));
   if (state.mode === 'photo') analyzePhoto();
 }
 sensitivitySlider.addEventListener('input', applySensitivity);

@@ -7,11 +7,12 @@
  * unmatched, and retire objects that stay missing for maxDisappeared updates.
  */
 class CentroidTracker {
-  constructor(maxDistance = 110, maxDisappeared = 10) {
+  constructor(maxDistance = 90, maxDisappeared = 14, smoothing = 0.5) {
     this.nextId = 0;
-    this.objects = new Map(); // id -> { cx, cy, prevCx, prevCy, box, disappeared, counted, flash }
+    this.objects = new Map(); // id -> { cx, cy, prevCx, prevCy, box, disappeared, counted, flash, age }
     this.maxDistance = maxDistance;
     this.maxDisappeared = maxDisappeared;
+    this.smoothing = smoothing; // EMA weight on the previous position (jitter damping)
   }
 
   reset() {
@@ -22,7 +23,7 @@ class CentroidTracker {
   _register(d) {
     this.objects.set(this.nextId++, {
       cx: d.cx, cy: d.cy, prevCx: d.cx, prevCy: d.cy,
-      box: d.box, disappeared: 0, counted: false, flash: 0,
+      box: d.box, disappeared: 0, counted: false, flash: 0, age: 0,
     });
   }
 
@@ -61,9 +62,14 @@ class CentroidTracker {
       if (usedObj.has(p.i) || usedDet.has(p.j)) continue;
       usedObj.add(p.i); usedDet.add(p.j);
       const obj = objs[p.i], det = detections[p.j];
+      const a = this.smoothing;
       obj.prevCx = obj.cx; obj.prevCy = obj.cy;
-      obj.cx = det.cx; obj.cy = det.cy; obj.box = det.box;
+      // Exponential moving average damps per-frame centroid jitter.
+      obj.cx = a * obj.cx + (1 - a) * det.cx;
+      obj.cy = a * obj.cy + (1 - a) * det.cy;
+      obj.box = det.box;
       obj.disappeared = 0;
+      obj.age++;
     }
 
     for (let i = 0; i < objs.length; i++) {
